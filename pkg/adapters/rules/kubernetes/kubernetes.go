@@ -114,8 +114,8 @@ func New(config Config) (*Adapter, error) {
 		RulesCacheResyncPeriod,
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    workqueue.EnqueueingAddFunc(adapter.addRule),
-			UpdateFunc: workqueue.EnqueueingUpdateFunc(adapter.updateRules),
-			DeleteFunc: workqueue.EnqueueingDeleteFunc(adapter.deleteRules),
+			UpdateFunc: workqueue.EnqueueingUpdateFunc(adapter.updateRule),
+			DeleteFunc: workqueue.EnqueueingDeleteFunc(adapter.deleteRule),
 		},
 	)
 	return adapter, adapter.Start()
@@ -123,7 +123,6 @@ func New(config Config) (*Adapter, error) {
 
 // Start synchronizing the Kubernetes adapter.
 func (a *Adapter) Start() error {
-	a.workqueue.Start()
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
@@ -134,8 +133,24 @@ func (a *Adapter) Start() error {
 		return err
 	}
 	a.stopChan = make(chan struct{})
-
+	a.workqueue.Start()
 	go a.rulesController.Run(a.stopChan)
+	return nil
+}
+
+// Stop synchronizing the Kubernetes adapter.
+func (a *Adapter) Stop() error {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	if a.stopChan == nil {
+		err := fmt.Errorf("kubernetes adapter not started")
+		logger.WithError(err).Errorf("Failed stopping Kubernetes adapter")
+		return err
+	}
+	close(a.stopChan)
+	a.stopChan = nil
+	a.workqueue.Stop()
 	return nil
 }
 
@@ -186,21 +201,7 @@ func createRulesClient(config Config) (*rest.RESTClient, error) {
 	return client, nil
 }
 
-// Stop synchronizing the Kubernetes adapter.
-func (a *Adapter) Stop() error {
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
 
-	if a.stopChan == nil {
-		err := fmt.Errorf("kubernetes adapter not started")
-		logger.WithError(err).Errorf("Failed stopping Kubernetes adapter")
-		return err
-	}
-	close(a.stopChan)
-	a.stopChan = nil
-	a.workqueue.Stop()
-	return nil
-}
 
 // ListRules queries for the list of rules currently exist.
 func (a *Adapter) ListRules(f *a8api.RuleFilter) (*a8api.RulesSet, error) {
@@ -222,18 +223,18 @@ func (a *Adapter) ListRules(f *a8api.RuleFilter) (*a8api.RulesSet, error) {
 
 // addRule is the callback invoked by the Kubernetes cache when a rule API resource is added.
 func (a *Adapter) addRule(obj interface{}) {
-	a.storeRules(&obj)
+	a.storeRule(&obj)
 }
 
 // updateRule is the callback invoked by the Kubernetes cache when a rule API resource is updated.
-func (a *Adapter) updateRules(oldObj, newObj interface{}) {
-	a.storeRules(&newObj)
+func (a *Adapter) updateRule(oldObj, newObj interface{}) {
+	a.storeRule(&newObj)
 
 }
 
 // storeRules is a helper function called by updateRules() and addRule() callback functions. is stores or updates rules
 // int the rules map of the adapter.
-func (a *Adapter) storeRules(obj *interface{}) {
+func (a *Adapter) storeRule(obj *interface{}) {
 	newRule, ok := (*obj).(*RoutingRule)
 	if !ok {
 		logger.Warnf("Invalid rule : object is of type %T", obj)
@@ -257,7 +258,7 @@ func (a *Adapter) storeRules(obj *interface{}) {
 }
 
 // deleteRule is the callback invoked by the Kubernetes cache when a rule API resource is deleted.
-func (a *Adapter) deleteRules(obj interface{}) {
+func (a *Adapter) deleteRule(obj interface{}) {
 	rule, ok := extractDeletedObject(obj).(*RoutingRule)
 	if !ok {
 		logger.Warnf("Trying to delete Invalid rule : object is of type %T", obj)
