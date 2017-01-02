@@ -16,9 +16,10 @@ package kubernetes
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
-	"strings"
+
 	a8api "github.com/amalgam8/amalgam8/pkg/api"
 	"github.com/amalgam8/amalgam8/pkg/auth"
 	"github.com/amalgam8/amalgam8/pkg/errors"
@@ -75,9 +76,8 @@ type Adapter struct {
 	// revision . We assume that sidecar and rules fetcher runs always together
 	revision int
 
-	//ruleChan chan struct{}
-	// mutex is used to synchronize access to the 'services' map,
-	// which is read by the ListXXX() methods (externally),
+	// mutex is used to synchronize access to the 'rules' map,
+	// which is read by the ListRules() method (externally),
 	// and is written by the cache event handlers (internally).
 	// Given that we expect a single reader only, we use a regular sync.Mutex rather than a sync.RWMutex.
 	mutex sync.Mutex
@@ -85,7 +85,6 @@ type Adapter struct {
 
 // New creates and starts a new Kubernetes Rules adapter.
 func New(config Config) (*Adapter, error) {
-	logger.Info("Adapter starting..." )
 	namespace := config.Namespace.String()
 	// If no namespace is specified, fallback to default namespace
 	if namespace == "" {
@@ -104,9 +103,12 @@ func New(config Config) (*Adapter, error) {
 		workqueue: workqueue,
 		rules:     make(map[string]*a8api.Rule),
 		namespace: namespace,
-		revision: 0,
+		revision:  0,
 	}
 	adapter.rulesCache, adapter.rulesController = cache.NewInformer(
+		// In Kubernetes the kind of the ThirdPartyResource takes the form <kind name>.<domain>.
+		// Kind names will be converted to CamelCase when creating instances of the ThirdPartyResource.
+		// Hyphens in the kind are assumed to be word breaks and are converted by kubernetes to CamelCase.
 		cache.NewListWatchFromClient(client, fmt.Sprintf("%ss", strings.Replace(ResourceName, "-", "", -1)), namespace, nil),
 		&RoutingRule{},
 		RulesCacheResyncPeriod,
@@ -116,14 +118,12 @@ func New(config Config) (*Adapter, error) {
 			DeleteFunc: workqueue.EnqueueingDeleteFunc(adapter.deleteRules),
 		},
 	)
-	logger.Info("Calling Adapter start" )
-	adapter.workqueue.Start()
-
 	return adapter, adapter.Start()
 }
 
 // Start synchronizing the Kubernetes adapter.
 func (a *Adapter) Start() error {
+	a.workqueue.Start()
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
@@ -179,7 +179,7 @@ func createRulesClient(config Config) (*rest.RESTClient, error) {
 
 	client, err := rest.RESTClientFor(kubeConfig)
 	if err != nil {
-		logger.Printf("Failed to create the in-cluster client. %s\n", err)
+		logger.WithError(err).Errorf("Failed to create the in-cluster client.")
 		return nil, err
 	}
 
@@ -214,51 +214,34 @@ func (a *Adapter) ListRules(f *a8api.RuleFilter) (*a8api.RulesSet, error) {
 	rules = f.Apply(rules)
 	rulesSet := &a8api.RulesSet{
 		Rules:    rules,
-		Revision: 1, // TODO: how to fill revision ?
-
+		Revision: int64(a.revision),
 	}
-	logger.Info("List rules: %v", rulesSet.Rules )
+
 	return rulesSet, nil
 }
 
 // addRule is the callback invoked by the Kubernetes cache when a rule API resource is added.
 func (a *Adapter) addRule(obj interface{}) {
-	rule, ok := obj.(*RoutingRule)
-	if !ok {
-		logger.Warnf("Invalid rule added: object is of type %T", obj)
-		return
-	}
-	if rule.Status.State == RuleStateInvalid {
-		logger.Warnf("Rule state is invalid. Rule %#v will not be added", rule)
-		return
-	} else if rule.Status.State == RuleStateValid {
-		a.revision++
-		a8Rule := &rule.Spec
-		ruleName := rule.Metadata.Name
-		a.rules[ruleName] = a8Rule
-		return
-	} else {
-		logger.Warnf("Rule state %s is undefiend . Rule %#v will not be added", rule.Status.State, rule)
-		return
-	}
+	a.storeRules(&obj)
 }
 
 // updateRule is the callback invoked by the Kubernetes cache when a rule API resource is updated.
 func (a *Adapter) updateRules(oldObj, newObj interface{}) {
-	oldRule, ok := oldObj.(*RoutingRule)
-	if !ok {
-		logger.Warnf("Invalid rule update: old object is of type %T\n", oldObj)
-		return
-	}
-	newRule, ok := newObj.(*RoutingRule)
-	if !ok {
-		logger.Warnf("Invalid rule update: new object is of type %T\n", newObj)
-		return
-	}
+	a.storeRules(&newObj)
 
+}
+
+// storeRules is a helper function called by updateRules() and addRule() callback functions. is stores or updates rules
+// int the rules map of the adapter.
+func (a *Adapter) storeRules(obj *interface{}) {
+	newRule, ok := (*obj).(*RoutingRule)
+	if !ok {
+		logger.Warnf("Invalid rule : object is of type %T", obj)
+		return
+	}
 	if newRule.Status.State == RuleStateInvalid {
 		a.revision++
-		delete(a.rules, oldRule.Metadata.Name)
+		delete(a.rules, newRule.Metadata.Name)
 		return
 	} else if newRule.Status.State == RuleStateValid {
 		a.revision++
@@ -267,18 +250,31 @@ func (a *Adapter) updateRules(oldObj, newObj interface{}) {
 		a.rules[ruleName] = a8Rule
 		return
 	} else {
-		logger.Warnf("Updated rule state %s is undefiend . Rule %#v will not be updated", newRule.Status.State, oldRule)
+		logger.Warnf("Rule state %s is undefined . Rule %s will not be updated or created",
+			newRule.Status.State, newRule.Metadata.Name)
 		return
 	}
 }
 
+// deleteRule is the callback invoked by the Kubernetes cache when a rule API resource is deleted.
 func (a *Adapter) deleteRules(obj interface{}) {
-	rule, ok := obj.(*RoutingRule)
+	rule, ok := extractDeletedObject(obj).(*RoutingRule)
 	if !ok {
 		logger.Warnf("Trying to delete Invalid rule : object is of type %T", obj)
 		return
 	}
-	a.revision++
 	ruleName := rule.Metadata.Name
 	delete(a.rules, ruleName)
+	a.revision++
+
+}
+
+// extractDeletedObject is used within "deleteXXX" cache callbacks, where the provided
+// object may be a wrapper (DeletedFinalStateUnknown) around the actual deleted object.
+func extractDeletedObject(obj interface{}) interface{} {
+	deleted, ok := obj.(cache.DeletedFinalStateUnknown)
+	if ok {
+		return deleted.Obj
+	}
+	return obj
 }

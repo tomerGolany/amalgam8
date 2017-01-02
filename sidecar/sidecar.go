@@ -271,9 +271,9 @@ func buildProxyAdapter(conf *config.Config, discovery monitor.DiscoveryMonitor, 
 		return proxy.NewNGINXAdapter(conf, discovery, rules)
 	default:
 		return nil, fmt.Errorf("Unsupported proxy adapter: %v", conf.ProxyAdapter)
+
 	}
 }
-
 
 func startProxy(conf *config.Config, discovery api.ServiceDiscovery) error {
 
