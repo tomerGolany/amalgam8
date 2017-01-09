@@ -221,19 +221,19 @@ func (a *Adapter) ListRules(f *a8api.RuleFilter) (*a8api.RulesSet, error) {
 
 // addRule is the callback invoked by the Kubernetes cache when a rule API resource is added.
 func (a *Adapter) addRule(obj interface{}) {
-	a.storeRule(&obj)
+	a.storeRule(obj)
 }
 
 // updateRule is the callback invoked by the Kubernetes cache when a rule API resource is updated.
 func (a *Adapter) updateRule(oldObj, newObj interface{}) {
-	a.storeRule(&newObj)
+	a.storeRule(newObj)
 
 }
 
 // storeRules is a helper function called by updateRules() and addRule() callback functions. is stores or updates rules
 // int the rules map of the adapter.
-func (a *Adapter) storeRule(obj *interface{}) {
-	newRule, ok := (*obj).(*RoutingRule)
+func (a *Adapter) storeRule(obj interface{}) {
+	newRule, ok := (obj).(*RoutingRule)
 	if !ok {
 		logger.Warnf("Invalid rule : object is of type %T", obj)
 		return
