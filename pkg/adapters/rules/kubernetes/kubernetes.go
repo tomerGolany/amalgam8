@@ -22,13 +22,8 @@ import (
 
 	a8api "github.com/amalgam8/amalgam8/pkg/api"
 	"github.com/amalgam8/amalgam8/pkg/auth"
-	"github.com/amalgam8/amalgam8/pkg/errors"
 	kubepkg "github.com/amalgam8/amalgam8/pkg/kubernetes"
 	"github.com/amalgam8/amalgam8/registry/utils/logging"
-	"k8s.io/client-go/pkg/api"
-	"k8s.io/client-go/pkg/api/unversioned"
-	"k8s.io/client-go/pkg/runtime"
-	"k8s.io/client-go/pkg/runtime/serializer"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 )
@@ -91,8 +86,19 @@ func New(config Config) (*Adapter, error) {
 		namespace = "default"
 	}
 
+	tprConfig := &kubepkg.TPRConfig{Name: ResourceName,
+		GroupName:   ResourceGroupName,
+		Version:     ResourceVersion,
+		Description: ResourceDescription,
+		Type:        &RoutingRule{},
+		ListType:    &RoutingRuleList{}}
+
+	kubePkgConfig := kubepkg.Config{URL: config.URL,
+		Token: config.Token}
+
 	// Create the kubernetes client for the rules resource
-	client, err := createRulesClient(config)
+	client, err := kubepkg.NewTPRClient(kubePkgConfig, tprConfig)
+
 	if err != nil {
 		return nil, err
 	}
@@ -152,53 +158,6 @@ func (a *Adapter) Stop() error {
 	a.stopChan = nil
 	a.workqueue.Stop()
 	return nil
-}
-
-func createRulesClient(config Config) (*rest.RESTClient, error) {
-	var kubeConfig *rest.Config
-	if config.URL != "" {
-		kubeConfig = &rest.Config{
-			Host:        config.URL,
-			BearerToken: config.Token,
-		}
-	} else {
-		var err error
-		kubeConfig, err = rest.InClusterConfig()
-		if err != nil {
-			return nil, errors.Wrap(err, "Failed loading Kubernetes credentials from service account")
-		}
-	}
-
-	groupversion := unversioned.GroupVersion{
-		Group:   ResourceGroupName,
-		Version: ResourceVersion,
-	}
-
-	kubeConfig.GroupVersion = &groupversion
-	kubeConfig.APIPath = "/apis"
-	kubeConfig.ContentType = runtime.ContentTypeJSON
-	kubeConfig.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: api.Codecs}
-
-	schemeBuilder := runtime.NewSchemeBuilder(
-		func(scheme *runtime.Scheme) error {
-			scheme.AddKnownTypes(
-				groupversion,
-				&RoutingRule{},
-				&RoutingRuleList{},
-				&api.ListOptions{},
-				&api.DeleteOptions{},
-			)
-			return nil
-		})
-	schemeBuilder.AddToScheme(api.Scheme)
-
-	client, err := rest.RESTClientFor(kubeConfig)
-	if err != nil {
-		logger.WithError(err).Errorf("Failed to create the in-cluster client.")
-		return nil, err
-	}
-
-	return client, nil
 }
 
 // ListRules queries for the list of rules currently exist.
