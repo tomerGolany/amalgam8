@@ -201,8 +201,6 @@ func createRulesClient(config Config) (*rest.RESTClient, error) {
 	return client, nil
 }
 
-
-
 // ListRules queries for the list of rules currently exist.
 func (a *Adapter) ListRules(f *a8api.RuleFilter) (*a8api.RulesSet, error) {
 	a.mutex.Lock()
